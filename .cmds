@@ -1,0 +1,2 @@
+systemctl restart docbot
+systemctl status docbot
