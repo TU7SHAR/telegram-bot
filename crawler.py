@@ -4,7 +4,6 @@ from config import FIRECRAWL_API_KEY
 
 logger = logging.getLogger(__name__)
 
-# Initialize the modern Firecrawl class
 try:
     fire_app = Firecrawl(api_key=FIRECRAWL_API_KEY)
 except Exception as e:
@@ -17,8 +16,6 @@ async def deep_crawl_url(url, limit=5):
         raise Exception("Firecrawl is not initialized. Check your FIRECRAWL_API_KEY.")
     
     try:
-        # Use direct keyword arguments instead of a 'params' dictionary
-        # and ensure you are using the .crawl() method
         result = fire_app.crawl(
             url=url,
             limit=limit,
