@@ -1,4 +1,5 @@
 .venv
 .env
+production.env
 oldercode
 /oldercode
