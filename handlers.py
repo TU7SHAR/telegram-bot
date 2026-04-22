@@ -3,13 +3,27 @@ import logging
 import asyncio
 import os
 import sys
+from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.error import NetworkError, BadRequest
 import scraper
 from groq_engine import get_groq_response
+from database import verify_and_authorize, is_authorized
 
 logger = logging.getLogger(__name__)
+
+def require_auth(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if not is_authorized(update.effective_user.id):
+            if update.callback_query:
+                await update.callback_query.answer("❌ Access Denied.", show_alert=True)
+            elif update.message:
+                await update.message.reply_text("❌ Access Denied. You must authenticate using a valid invite link first.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
 
 async def deactivate_old_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     last_id = context.user_data.get("last_menu_id")
@@ -35,21 +49,37 @@ def get_main_menu_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user.first_name
-    logger.info(f"COMMAND triggered: /start by user {user}")
-    await deactivate_old_menu(context, update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    user_name = update.effective_user.first_name
+
+    if not context.args:
+        logger.warning(f"UNAUTHORIZED: {user_name} tried to start without a token.")
+        await update.message.reply_text("❌ Access Denied. Please use a valid invite link from the dashboard.")
+        return
+
+    token_id = context.args[0]
+    telegram_id = update.effective_user.id
+    
+    is_valid = verify_and_authorize(token_id, telegram_id)
+    
+    if not is_valid:
+        await update.message.reply_text("❌ This invite link is invalid or has already been used.")
+        return
+
+    logger.info(f"ACCESS GRANTED: {user_name} activated a token.")
+    await deactivate_old_menu(context, chat_id)
+    
     context.user_data["file_map"] = {}
     context.user_data["msg_ids"] = []
+    
     sent_msg = await update.message.reply_html(
-        "<b>RAG Bot</b>\n\n"
-        "1. Select Upload File to see supported formats\n"
-        "2. Use /crawl [url] for web content\n"
-        "3. Use /manage to delete memory",
+        f"<b>Welcome {user_name}!</b>\n\n"
+        "Your access is now active. You can upload documents or crawl websites to start chatting.",
         reply_markup=get_main_menu_keyboard()
     )
     context.user_data["last_menu_id"] = sent_msg.message_id
-    context.user_data["msg_ids"].extend([sent_msg.message_id, update.message.message_id])
 
+@require_auth
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"COMMAND triggered: /menu or 'menu' text by user {update.effective_user.first_name}")
     await deactivate_old_menu(context, update.effective_chat.id)
@@ -59,6 +89,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data['msg_ids'] = []
     context.user_data["msg_ids"].extend([sent_msg.message_id, update.message.message_id])
 
+@require_auth
 async def clear_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("COMMAND triggered: /clearchat (Screen only)")
     chat_id = update.effective_chat.id
@@ -79,6 +110,7 @@ async def clear_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         pass
 
+@require_auth
 async def clear_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("COMMAND triggered: /clearhistory (Full memory wipe)")
     chat_id = update.effective_chat.id
@@ -101,11 +133,13 @@ async def clear_history_command(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         pass
 
+@require_auth
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.warning("COMMAND triggered: /restart. Rebooting system now.")
     await update.message.reply_text("Restarting bot... Please wait.")
     os.execl(sys.executable, sys.executable, *sys.argv)
 
+@require_auth
 async def handle_crawl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await deactivate_old_menu(context, update.effective_chat.id)
     if 'msg_ids' not in context.user_data:
@@ -170,6 +204,7 @@ async def handle_crawl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"CRAWL CRITICAL ERROR -> {str(e)}")
         await status_msg.edit_text(logs + f"\nCRITICAL ERROR: {str(e)}")
 
+@require_auth
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"DOCUMENT received: {update.message.document.file_name}")
     await deactivate_old_menu(context, update.effective_chat.id)
@@ -202,6 +237,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.error(f"FILE ERROR -> Failed to process {file.file_name}: {str(e)}")
         await msg.edit_text(f"Failed: {str(e)}")
 
+@require_auth
 async def manage_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("COMMAND triggered: /manage (or Manage Files menu)")
     effective_message = update.callback_query.message if update.callback_query else update.message
@@ -230,6 +266,7 @@ async def manage_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context.user_data['msg_ids'] = []
     context.user_data['msg_ids'].append(sent_msg.message_id)
 
+@require_auth
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     logger.info(f"BUTTON CLICK -> User pressed: {query.data}")
@@ -305,6 +342,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.info(f"FILE DELETE -> Removed {filename} from user memory.")
             await query.edit_message_text(f"Removed: {filename}")
 
+@require_auth
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if 'msg_ids' not in context.user_data:
         context.user_data['msg_ids'] = []
