@@ -24,6 +24,16 @@ def get_user_role(telegram_id: int) -> str:
         logger.error(f"Role fetch error: {e}")
         return "normal"
 
+def get_google_id(telegram_id: int) -> str:
+    try:
+        res = supabase.table("invite_tokens").select("created_by").eq("used_by_telegram_id", telegram_id).execute()
+        if res.data and res.data[0].get("created_by"):
+            return res.data[0]["created_by"]
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching Google ID: {e}")
+        return None
+
 def verify_and_authorize(token_suffix: str, telegram_id: int, telegram_username: str):
     try:
         search_str = f"%{token_suffix}%"
@@ -57,18 +67,19 @@ def verify_and_authorize(token_suffix: str, telegram_id: int, telegram_username:
         logger.error(f"Authorization Error: {e}")
         return False
     
-def log_ingested_file(filename: str, telegram_id: int, username: str):
+def log_ingested_file(filename: str, telegram_id: int, username: str, google_id: str):
     try:
         supabase.table("ingested_files").insert({
             "filename": filename,
             "uploaded_by_telegram_id": telegram_id,
-            "uploaded_by_username": username
+            "uploaded_by_username": username,
+            "created_by": google_id
         }).execute()
     except Exception as e:
         logger.error(f"Failed to log file to db: {e}")
 
-def remove_ingested_file(filename: str):
+def remove_ingested_file(filename: str, google_id: str):
     try:
-        supabase.table("ingested_files").delete().eq("filename", filename).execute()
+        supabase.table("ingested_files").delete().eq("filename", filename).eq("created_by", google_id).execute()
     except Exception as e:
         logger.error(f"Failed to delete file from db: {e}")

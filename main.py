@@ -2,7 +2,7 @@ import logging
 import sys
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, PicklePersistence
-from config import TELEGRAM_TOKEN
+from config import TELEGRAM_TOKEN, WEBHOOK_URL, PORT, WEBHOOK_SECRET_TOKEN
 import handlers
 
 logging.basicConfig(
@@ -32,8 +32,14 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Document.ALL, handlers.handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_message))        
     
-    logger.info("Bot is polling and ready for messages!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    logger.info(f"Starting Webhook on port {PORT}. Listening for Telegram...")
+    
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=WEBHOOK_URL,
+        secret_token=WEBHOOK_SECRET_TOKEN, 
+    )
 
 if __name__ == "__main__":
     main()

@@ -20,6 +20,7 @@ prompt = ChatPromptTemplate.from_messages([
         "When you answer, you MUST start your response by mentioning the source file name(s). "
         "Example: 'According to [filename.pdf]...' "
         "Strictly provide the final answer only—no reasoning or <think> tags.\n\n"
+        "Don't use **, # or any markdown in your answer. Just plain text. Always mention the source file(s) in your answer at last in new lines.\n"
         "CONTEXT:\n{context}"
     )),
     ("human", "{question}")
