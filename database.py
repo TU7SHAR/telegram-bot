@@ -14,11 +14,20 @@ def is_authorized(telegram_id: int) -> bool:
         logger.error(f"Auth check error: {e}")
         return False
 
-def verify_and_authorize(token_suffix: str, telegram_id: int):
+def get_user_role(telegram_id: int) -> str:
+    try:
+        res = supabase.table("invite_tokens").select("token_type").eq("used_by_telegram_id", telegram_id).execute()
+        if res.data and res.data[0].get("token_type"):
+            return res.data[0]["token_type"].lower()
+        return "normal"
+    except Exception as e:
+        logger.error(f"Role fetch error: {e}")
+        return "normal"
+
+def verify_and_authorize(token_suffix: str, telegram_id: int, telegram_username: str):
     try:
         search_str = f"%{token_suffix}%"
         
-        # 1. Fetch the token without the strict False check to bypass the NULL trap
         res = supabase.table("invite_tokens").select("*").ilike("token_string", search_str).execute()
 
         if not res.data:
@@ -27,18 +36,16 @@ def verify_and_authorize(token_suffix: str, telegram_id: int):
 
         token_record = res.data[0]
 
-        # 2. Safely check if it's used in Python (handles both True and NULL)
         if token_record.get('is_used') is True:
             logger.warning("Token is already marked as used.")
             return False
 
-        # 3. Mark token as used
         supabase.table("invite_tokens").update({
             "is_used": True, 
-            "used_by_telegram_id": telegram_id 
+            "used_by_telegram_id": telegram_id,
+            "used_by_username": telegram_username
         }).eq("id", token_record['id']).execute()
 
-        # 4. UPSERT the user to prevent Primary Key crashes if you test multiple times
         supabase.table("authorized_users").upsert({
             "telegram_id": telegram_id,
             "token_used": token_record['token_string']
@@ -49,3 +56,19 @@ def verify_and_authorize(token_suffix: str, telegram_id: int):
     except Exception as e:
         logger.error(f"Authorization Error: {e}")
         return False
+    
+def log_ingested_file(filename: str, telegram_id: int, username: str):
+    try:
+        supabase.table("ingested_files").insert({
+            "filename": filename,
+            "uploaded_by_telegram_id": telegram_id,
+            "uploaded_by_username": username
+        }).execute()
+    except Exception as e:
+        logger.error(f"Failed to log file to db: {e}")
+
+def remove_ingested_file(filename: str):
+    try:
+        supabase.table("ingested_files").delete().eq("filename", filename).execute()
+    except Exception as e:
+        logger.error(f"Failed to delete file from db: {e}")
