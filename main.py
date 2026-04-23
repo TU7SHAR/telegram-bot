@@ -1,3 +1,4 @@
+from email.mime import application
 import logging
 import sys
 from telegram import Update
@@ -38,8 +39,9 @@ def main() -> None:
         listen="0.0.0.0",
         port=PORT,
         webhook_url=WEBHOOK_URL,
+        url_path="webhook",  # <--- ADD THIS EXACT LINE
         secret_token=WEBHOOK_SECRET_TOKEN, 
-    )
+     )
 
 if __name__ == "__main__":
     main()
