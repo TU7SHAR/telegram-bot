@@ -429,11 +429,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     google_id = context.user_data.get('google_id')
     files = get_tenant_files(context)
 
-    # 1. Fetch Dynamic Settings from Supabase
+    # 1. Fetch Dynamic Settings from Supabase linked to the Admin (google_id)
     settings = get_bot_settings(google_id)
     
     # 2. Maintenance Mode Check
-    # Blocks normal users if Maintenance Mode is ON in the dashboard
+    # Blocks non-admins if Maintenance Mode is toggled ON in the dashboard
     if settings.get('maintenance_mode') and role != 'admin':
         msg = await update.message.reply_html(
             "🚧 <b>Maintenance Mode</b>\nThe bot is temporarily offline for updates. Please check back later."
@@ -441,7 +441,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data['msg_ids'].append(msg.message_id)
         return
     
-    # --- Existing Role & Mode Logic ---
+    # --- Mode Logic ---
     if role == 'admin' and mode == 'test':
         safe_name = "CustomText"
         filename = f"{safe_name}_{hashlib.md5(user_text.encode()).hexdigest()[:6]}.txt"
@@ -476,16 +476,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
     try:
-        # 3. Use Dynamic Temperature from Settings
-        # If strictKnowledge is enabled, this will be 0.2; otherwise 0.8
+        # 3. Use Dynamic Temperature from Settings (Dashboard controlled)
+        # Defaults to 0.2 if settings aren't found
         current_temp = settings.get('temperature', 0.2)
         
         response = await get_groq_response(user_text, full_context, temperature=current_temp)
         msg = await update.message.reply_text(response)
         context.user_data['msg_ids'].append(msg.message_id)
 
-        # 4. Log Chat Analytics
-        # Saves the query and response to your Supabase table for the dashboard
+        # 4. Log Chat Analytics to Supabase
+        # Captures the conversation for the Admin dashboard
         log_chat_interaction(
             telegram_id=user.id,
             username=user.username or user.first_name,
@@ -498,7 +498,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error(f"Error in handle_message: {e}")
         msg = await update.message.reply_text("Error processing request.")
         context.user_data['msg_ids'].append(msg.message_id)
-        
+
 async def clear_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Hidden command: Doesn't show in any menus
     telegram_id = update.effective_user.id

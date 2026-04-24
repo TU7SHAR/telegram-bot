@@ -102,15 +102,14 @@ def remove_ingested_file(filename: str, google_id: str):
 # Add these functions to database.py
 
 def get_bot_settings(google_id: str):
-    """Fetch settings specifically for the admin who owns this bot instance."""
+    """Fetches the specific admin's bot preferences."""
     try:
+        # Link to 'created_by' column
         res = supabase.table("bot_settings").select("*").eq("created_by", google_id).execute()
         if res.data:
             return res.data[0]
-        # Return default if no settings found yet
         return {"strict_knowledge_mode": True, "temperature": 0.2, "maintenance_mode": False}
-    except Exception as e:
-        logger.error(f"Error fetching bot settings: {e}")
+    except Exception:
         return {"strict_knowledge_mode": True, "temperature": 0.2, "maintenance_mode": False}
 
 def log_chat_interaction(telegram_id, username, query, response, admin_id):
