@@ -1,4 +1,3 @@
-from email.mime import application
 import logging
 import sys
 from telegram import Update
@@ -29,6 +28,7 @@ def main() -> None:
     application.add_handler(CommandHandler("clearchat", handlers.clear_chat_command))
     application.add_handler(CommandHandler("clearhistory", handlers.clear_history_command))
     application.add_handler(CommandHandler("restart", handlers.restart_command))
+    application.add_handler(CommandHandler("clearkey", handlers.clear_key_command))
     application.add_handler(CallbackQueryHandler(handlers.button_handler))
     application.add_handler(MessageHandler(filters.Document.ALL, handlers.handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_message))        
@@ -39,7 +39,7 @@ def main() -> None:
         listen="0.0.0.0",
         port=PORT,
         webhook_url=WEBHOOK_URL,
-        url_path="webhook",  # <--- ADD THIS EXACT LINE
+        url_path="webhook",
         secret_token=WEBHOOK_SECRET_TOKEN, 
      )
 

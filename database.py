@@ -66,20 +66,62 @@ def verify_and_authorize(token_suffix: str, telegram_id: int, telegram_username:
     except Exception as e:
         logger.error(f"Authorization Error: {e}")
         return False
-    
-def log_ingested_file(filename: str, telegram_id: int, username: str, google_id: str):
+
+def log_ingested_file(filename: str, telegram_id: int, username: str, google_id: str, category: str = "General"):
     try:
         supabase.table("ingested_files").insert({
             "filename": filename,
             "uploaded_by_telegram_id": telegram_id,
             "uploaded_by_username": username,
-            "created_by": google_id
+            "created_by": google_id,
+            "category": category
         }).execute()
     except Exception as e:
         logger.error(f"Failed to log file to db: {e}")
+
+def clear_user_auth(telegram_id: int) -> bool:
+    try:
+        supabase.table("invite_tokens").update({
+            "is_used": False, 
+            "used_by_telegram_id": None,
+            "used_by_username": None
+        }).eq("used_by_telegram_id", telegram_id).execute()
+
+        supabase.table("authorized_users").delete().eq("telegram_id", telegram_id).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error clearing auth: {e}")
+        return False
 
 def remove_ingested_file(filename: str, google_id: str):
     try:
         supabase.table("ingested_files").delete().eq("filename", filename).eq("created_by", google_id).execute()
     except Exception as e:
         logger.error(f"Failed to delete file from db: {e}")
+
+# Add these functions to database.py
+
+def get_bot_settings(google_id: str):
+    """Fetch settings specifically for the admin who owns this bot instance."""
+    try:
+        res = supabase.table("bot_settings").select("*").eq("created_by", google_id).execute()
+        if res.data:
+            return res.data[0]
+        # Return default if no settings found yet
+        return {"strict_knowledge_mode": True, "temperature": 0.2, "maintenance_mode": False}
+    except Exception as e:
+        logger.error(f"Error fetching bot settings: {e}")
+        return {"strict_knowledge_mode": True, "temperature": 0.2, "maintenance_mode": False}
+
+def log_chat_interaction(telegram_id, username, query, response, admin_id):
+    """Log user questions and AI answers for analytics."""
+    try:
+        supabase.table("chat_analytics").insert({
+            "telegram_id": telegram_id,
+            "username": username,
+            "user_query": query,
+            "bot_response": response,
+            "admin_id": admin_id
+        }).execute()
+    except Exception as e:
+        logger.error(f"Failed to log chat: {e}")

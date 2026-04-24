@@ -9,7 +9,7 @@ from telegram.ext import ContextTypes
 from telegram.error import NetworkError, BadRequest
 import scraper
 from groq_engine import get_groq_response
-from database import verify_and_authorize, is_authorized, get_user_role, log_ingested_file, remove_ingested_file, get_google_id
+from database import get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth
 
 logger = logging.getLogger(__name__)
 
@@ -260,14 +260,28 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         tg_file = await context.bot.get_file(file.file_id)
         file_bytes = await tg_file.download_as_bytearray()
         content, truncated, processed, unprocessed = await scraper.extract_content(file_bytes, file.file_name)
-        files[file.file_name] = {
+        
+        # 1. Hold the file data temporarily
+        context.user_data['pending_file'] = {
+            "filename": file.file_name,
             "text": content,
             "file_id": file.file_id,
             "is_crawl": False
         }
-        log_ingested_file(file.file_name, update.effective_user.id, update.effective_user.username or update.effective_user.first_name, google_id)
-        status = f"Truncated\nProcessed: {processed} chars" if truncated else "Complete"
-        await msg.edit_text(f"Added {file.file_name}\nStatus: {status}")
+        
+        # 2. Create the Category Buttons
+        keyboard = [
+            [InlineKeyboardButton(" Technical", callback_data="cat_Technical"),
+             InlineKeyboardButton(" Marketing", callback_data="cat_Marketing")],
+            [InlineKeyboardButton(" HR", callback_data="cat_HR"),
+             InlineKeyboardButton(" General", callback_data="cat_General")]
+        ]
+        
+        await msg.edit_text(
+            f"File read successfully! Please select a category for <b>{file.file_name}</b>:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
     except Exception as e:
         await msg.edit_text(f"Failed: {str(e)}")
 
@@ -369,12 +383,40 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             del files[filename]
             remove_ingested_file(filename, google_id)
             await query.edit_message_text(f"Removed: {filename}")
+    elif query.data.startswith("cat_"):
+        category = query.data.split("_")[1]
+        pending_file = context.user_data.get('pending_file')
+        
+        if not pending_file:
+            await query.edit_message_text("Session expired. Please upload the file again.")
+            return
+            
+        filename = pending_file['filename']
+        pending_file['category'] = category
+        
+        # 1. Save to bot memory
+        files = get_tenant_files(context)
+        files[filename] = pending_file
+        
+        # 2. Log to database with the new category
+        log_ingested_file(
+            filename, 
+            update.effective_user.id, 
+            update.effective_user.username or update.effective_user.first_name, 
+            google_id, 
+            category
+        )
+        
+        # 3. Clean up memory and update the UI
+        del context.user_data['pending_file']
+        await query.edit_message_text(f"✅ <b>{filename}</b> successfully saved under <b>[{category}]</b>.", parse_mode="HTML")
 
 @require_auth
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if 'msg_ids' not in context.user_data: context.user_data['msg_ids'] = []
     context.user_data['msg_ids'].append(update.message.message_id)
     user_text = update.message.text
+    user = update.effective_user
     
     if user_text.lower() == "menu":
         await show_menu(update, context)
@@ -386,7 +428,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     mode = context.user_data.get('mode', 'use')
     google_id = context.user_data.get('google_id')
     files = get_tenant_files(context)
+
+    # 1. Fetch Dynamic Settings from Supabase
+    settings = get_bot_settings(google_id)
     
+    # 2. Maintenance Mode Check
+    # Blocks normal users if Maintenance Mode is ON in the dashboard
+    if settings.get('maintenance_mode') and role != 'admin':
+        msg = await update.message.reply_html(
+            "🚧 <b>Maintenance Mode</b>\nThe bot is temporarily offline for updates. Please check back later."
+        )
+        context.user_data['msg_ids'].append(msg.message_id)
+        return
+    
+    # --- Existing Role & Mode Logic ---
     if role == 'admin' and mode == 'test':
         safe_name = "CustomText"
         filename = f"{safe_name}_{hashlib.md5(user_text.encode()).hexdigest()[:6]}.txt"
@@ -407,7 +462,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
     if not files:
         if role == 'admin':
-            msg = await update.message.reply_text("Your  Knowledge Base is empty. Upload files.", reply_markup=get_main_menu_keyboard(role, mode))
+            msg = await update.message.reply_text("Your Knowledge Base is empty. Upload files.", reply_markup=get_main_menu_keyboard(role, mode))
         else:
             msg = await update.message.reply_text("The knowledge base is currently empty.", reply_markup=get_main_menu_keyboard(role, mode))
         context.user_data["last_menu_id"] = msg.message_id 
@@ -419,13 +474,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         full_context += f"\n\n--- SOURCE: {name} ---\n{data['text']}"
         
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+    
     try:
-        response = await get_groq_response(user_text, full_context)
+        # 3. Use Dynamic Temperature from Settings
+        # If strictKnowledge is enabled, this will be 0.2; otherwise 0.8
+        current_temp = settings.get('temperature', 0.2)
+        
+        response = await get_groq_response(user_text, full_context, temperature=current_temp)
         msg = await update.message.reply_text(response)
         context.user_data['msg_ids'].append(msg.message_id)
+
+        # 4. Log Chat Analytics
+        # Saves the query and response to your Supabase table for the dashboard
+        log_chat_interaction(
+            telegram_id=user.id,
+            username=user.username or user.first_name,
+            query=user_text,
+            response=response,
+            admin_id=google_id
+        )
+
     except Exception as e:
+        logger.error(f"Error in handle_message: {e}")
         msg = await update.message.reply_text("Error processing request.")
         context.user_data['msg_ids'].append(msg.message_id)
+        
+async def clear_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Hidden command: Doesn't show in any menus
+    telegram_id = update.effective_user.id
+    
+    success = clear_user_auth(telegram_id)
+    
+    if success:
+        # Wipe local bot memory for this user
+        context.user_data.clear()
+        await update.message.reply_text("🔑 <b>Dev Mode:</b> Your auth is wiped. The token you used is now reusable. Send a new /start link.", parse_mode="HTML")
+    else:
+        await update.message.reply_text("❌ Failed to clear keys.")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     pass
