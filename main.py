@@ -31,6 +31,7 @@ def main() -> None:
     application.add_handler(CommandHandler("restart", handlers.restart_command))
     application.add_handler(CommandHandler("clearkey", handlers.clear_key_command))
     application.add_handler(CallbackQueryHandler(handlers.button_handler))
+    application.add_handler(MessageHandler(filters.COMMAND, handlers.unknown_command))
     application.add_handler(MessageHandler(filters.Document.ALL, handlers.handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_message))        
     

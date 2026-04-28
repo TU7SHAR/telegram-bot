@@ -3,6 +3,7 @@ import logging
 import asyncio
 import os
 import sys
+import random # FIXED: This was missing and caused the bot to freeze during test generation!
 from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -114,8 +115,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await deactivate_old_menu(context, chat_id)
     context.user_data["msg_ids"] = []
     
+    # 1. Send the Manual
+    manual_text = (
+        f"<b>Welcome {user_name}!</b>\n\nYour access is active. Role: {role.upper()}\n\n"
+        "<b> Command Manual:</b>\n"
+        "<code>/menu</code> - Open the main interaction menu\n"
+        "<code>/onboard</code> - Setup or update your profile\n"
+        "<code>/clearchat</code> - Clear the current screen\n"
+    )
+    if role == 'admin':
+        manual_text += (
+            "<code>/manage</code> - View and delete stored files\n"
+            "<code>/crawl [url]</code> - Scrape a website\n"
+            "<code>/clearhistory</code> - Wipe all bot memory\n"
+            "<code>/restart</code> - Reboot the bot\n"
+        )
+        
+    await update.message.reply_html(manual_text)
+
+    # 2. Automatically show the interactive menu
     sent_msg = await update.message.reply_html(
-        f"<b>Welcome {user_name}!</b>\n\nYour access is active. Role: {role.upper()}",
+        "<b>Main Menu</b>",
         reply_markup=get_main_menu_keyboard(role, context.user_data['mode'])
     )
     context.user_data["last_menu_id"] = sent_msg.message_id
@@ -250,7 +270,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     google_id = context.user_data.get('google_id')
     
     if role != 'admin' or mode != 'feed':
-        msg = await update.message.reply_text("❌ Must be Admin in Feed Mode.")
+        msg = await update.message.reply_text(" Must be Admin in Feed Mode.")
         if 'msg_ids' not in context.user_data: context.user_data['msg_ids'] = []
         context.user_data['msg_ids'].extend([msg.message_id, update.message.message_id])
         return
@@ -497,7 +517,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.edit_message_text(f" No documents found in <b>{category}</b>.", parse_mode="HTML")
             return
             
-        # 2. Randomize total questions between 3 and 7
+        # FIXED BUG: Missing import random at the top was causing this to crash!
         num_mcqs = random.randint(0, 4)
         total_questions = 3 + num_mcqs
             
@@ -557,6 +577,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as e:
             logger.error(f"Test generation error: {e}")
             await query.edit_message_text(" Error generating test.")
+            
     elif query.data.startswith("traincat_"):
         category = query.data.split("_")[1]
         await query.edit_message_text(f" Pulling training materials for <b>{category}</b>... Please wait.", parse_mode="HTML")
@@ -596,7 +617,7 @@ async def start_onboarding_command(update: Update, context: ContextTypes.DEFAULT
     """Triggered when user types /onboard"""
     telegram_id = update.effective_user.id
     update_user_state(telegram_id, mode="onboarding", step=1)
-    await update.message.reply_text("👋 Welcome to Onboarding! Let's get you set up.\n\nFirst, what is your full name?")
+    await update.message.reply_text(" Welcome to Onboarding! Let's get you set up.\n\nFirst, what is your full name?")
 
 async def handle_onboarding_step(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict):
     """Expanded Onboarding Flow with Bot Tutorial"""
@@ -645,7 +666,7 @@ async def handle_onboarding_step(update: Update, context: ContextTypes.DEFAULT_T
             "Let's get to work! What do you need help with today?"
         )
         await update.message.reply_html(tutorial_text) 
-        await update.message.reply_text("✅ Onboarding Complete! Your profile has been saved. You can now chat with the AI normally.")
+        await update.message.reply_text(" Onboarding Complete! Your profile has been saved. You can now chat with the AI normally.")
 
 async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict):
     """Processes the Dynamic Randomized Test Mode"""
@@ -655,7 +676,7 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     # Allow user to escape the test
     if text.lower() in ["/cancel", "cancel"]:
         update_user_state(t_id, mode="use", step=0, metadata={})
-        await update.message.reply_text("🚫 Test cancelled. Returning to normal chat mode.")
+        await update.message.reply_text(" Test cancelled. Returning to normal chat mode.")
         return
 
     step = state['current_step']
@@ -688,7 +709,7 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
         await update.message.reply_html(msg_text)
     else:
         # Evaluate All Answers
-        msg = await update.message.reply_html("⏳ <b>Evaluating your answers...</b> Please wait.")
+        msg = await update.message.reply_html(" <b>Evaluating your answers...</b> Please wait.")
         
         category = metadata.get("category")
         files = get_tenant_files(context)
@@ -739,14 +760,21 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if 'msg_ids' not in context.user_data: context.user_data['msg_ids'] = []
     context.user_data['msg_ids'].append(update.message.message_id)
+    
     user_text = update.message.text
     user = update.effective_user
     
-    state = get_user_state(user.id)
-    if state and state.get('current_mode') == 'onboarding':
-        await handle_onboarding_step(update, context, state)
+    # FIXED BUG: Safely ignore images/files sent without text
+    if not user_text:
         return
-    elif state.get('current_mode') == 'testing':
+    
+    # FIXED BUG: Safely check state without crashing if the user state is None
+    state = get_user_state(user.id)
+    if state:
+        if state.get('current_mode') == 'onboarding':
+            await handle_onboarding_step(update, context, state)
+            return
+        elif state.get('current_mode') == 'testing':
             await handle_test_step(update, context, state)
             return
 
@@ -769,11 +797,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             for name in files_to_remove:
                 del files[name]
 
-    # 1. Fetch Dynamic Settings from Supabase linked to the Admin (google_id)
-    settings = get_bot_settings(google_id)
+    # FIXED BUG: Handle None google_id safely to prevent Supabase crash
+    settings = get_bot_settings(google_id) if google_id else {}
     
     # 2. Maintenance Mode Check
-    # Blocks non-admins if Maintenance Mode is toggled ON in the dashboard
     if settings.get('maintenance_mode') and role != 'admin':
         msg = await update.message.reply_html(
             "🚧 <b>Maintenance Mode</b>\nThe bot is temporarily offline for updates. Please check back later."
@@ -817,22 +844,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     try:
         # 3. Use Dynamic Temperature from Settings (Dashboard controlled)
-        # Defaults to 0.2 if settings aren't found
         current_temp = settings.get('temperature', 0.2)
         
         response = await get_groq_response(user_text, full_context, temperature=current_temp)
         msg = await update.message.reply_text(response)
         context.user_data['msg_ids'].append(msg.message_id)
 
-        # 4. Log Chat Analytics to Supabase
-        # Captures the conversation for the Admin dashboard
-        log_chat_interaction(
-            telegram_id=user.id,
-            username=user.username or user.first_name,
-            query=user_text,
-            response=response,
-            admin_id=google_id
-        )
+        # 4. Log Chat Analytics to Supabase safely
+        if google_id:
+            log_chat_interaction(
+                telegram_id=user.id,
+                username=user.username or user.first_name,
+                query=user_text,
+                response=response,
+                admin_id=google_id
+            )
 
     except Exception as e:
         logger.error(f"Error in handle_message: {e}")
@@ -848,9 +874,17 @@ async def clear_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if success:
         # Wipe local bot memory for this user
         context.user_data.clear()
-        await update.message.reply_text("🔑 <b>Dev Mode:</b> Your auth is wiped. The token you used is now reusable. Send a new /start link.", parse_mode="HTML")
+        await update.message.reply_text(" <b>Dev Mode:</b> Your auth is wiped. The token you used is now reusable. Send a new /start link.", parse_mode="HTML")
     else:
-        await update.message.reply_text("❌ Failed to clear keys.")
+        await update.message.reply_text(" Failed to clear keys.")
 
+@require_auth
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("Unrecognized command. Please type /menu for further options.")
+    if 'msg_ids' not in context.user_data: 
+        context.user_data['msg_ids'] = []
+    context.user_data['msg_ids'].append(msg.message_id)
+
+# FIXED BUG: Logs errors properly instead of passing them silently
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    pass
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
