@@ -152,3 +152,28 @@ def save_onboarding_lead(data: dict):
         supabase.table("onboarding_leads").insert(data).execute()
     except Exception as e:
         logger.error(f"Lead save error: {e}")
+
+# --- NEW: SYNC FUNCTION ---
+def get_active_filenames(google_id: str):
+    """Fetches the list of filenames currently stored in Supabase for this user."""
+    try:
+        res = supabase.table("ingested_files").select("filename").eq("created_by", google_id).execute()
+        return [row['filename'] for row in res.data] if res.data else []
+    except Exception as e:
+        logger.error(f"Error fetching active files: {e}")
+        return None
+    
+def save_test_result(data: dict):
+    try:
+        supabase.table("test_results").insert(data).execute()
+    except Exception as e:
+        logger.error(f"Test result save error: {e}")
+
+def get_onboarding_lead(telegram_id: int):
+    """Fetches the user's onboarding data to personalize the AI tests."""
+    try:
+        res = supabase.table("onboarding_leads").select("*").eq("telegram_id", telegram_id).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        logger.error(f"Error fetching lead: {e}")
+        return None

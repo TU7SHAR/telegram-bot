@@ -9,7 +9,7 @@ from telegram.ext import ContextTypes
 from telegram.error import NetworkError, BadRequest
 import scraper
 from groq_engine import get_groq_response
-from database import get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth, get_user_state, update_user_state, save_onboarding_lead
+from database import get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth, get_user_state, update_user_state, save_onboarding_lead, get_active_filenames, save_test_result, get_onboarding_lead
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def get_main_menu_keyboard(role: str, mode: str):
         if mode != "feed":
             modes_row.append(InlineKeyboardButton("Feed Mode", callback_data="mode_feed"))
         if mode != "test":
-            modes_row.append(InlineKeyboardButton("Test Mode", callback_data="mode_test"))
+            modes_row.append(InlineKeyboardButton("Add Custom Data", callback_data="mode_test"))
         if mode != "use":
             modes_row.append(InlineKeyboardButton("Use Mode", callback_data="mode_use"))
         if modes_row:
@@ -75,9 +75,9 @@ def get_main_menu_keyboard(role: str, mode: str):
 
     # --- NEW: Show Sales Assistant features in 'Use Mode' ---
     if mode == "use":
-        keyboard.append([InlineKeyboardButton("📝 Start Onboarding", callback_data="start_onboarding")])
-        # We will uncomment the training button in the next step!
-        # keyboard.append([InlineKeyboardButton("🎓 Sales Training", callback_data="start_training")])
+        keyboard.append([InlineKeyboardButton(" Start Onboarding", callback_data="start_onboarding")])
+        keyboard.append([InlineKeyboardButton(" Training Mode", callback_data="start_training")])
+        keyboard.append([InlineKeyboardButton(" Test Mode", callback_data="start_test")])
 
     keyboard.append([InlineKeyboardButton("Clear Screen (Keep Memory)", callback_data="clear_chat")])
     if role == "admin":
@@ -336,6 +336,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     google_id = context.user_data.get("google_id")
     files = get_tenant_files(context)
     id_map = context.user_data.get("id_map", {})
+    if google_id:
+        active_filenames = get_active_filenames(google_id)
+        if active_filenames is not None:
+            files_to_remove = [name for name in list(files.keys()) if name not in active_filenames]
+            for name in files_to_remove:
+                del files[name]
     
     if query.data.startswith("mode_"):
         new_mode = query.data.split("_")[1]
@@ -346,23 +352,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "use": "<b>Use Mode</b>\nAsk questions based on the stored context."
         }
         await query.edit_message_text(text_map[new_mode], parse_mode="HTML", reply_markup=get_main_menu_keyboard(role, new_mode))
+        
     elif query.data == "menu_upload":
         await query.edit_message_text(
             "<b>File Upload Instructions</b>\n\n1. Click <b>Attachment</b> icon.\n2. Select Document.",
             parse_mode="HTML", reply_markup=get_main_menu_keyboard(role, mode)
         )
+        
     elif query.data == "menu_crawl":
         await query.edit_message_text(
             "<b>Web Crawler Instructions</b>\n\nUse <code>/crawl [url]</code>",
             parse_mode="HTML", reply_markup=get_main_menu_keyboard(role, mode)
         )
-    elif query.data == "start_onboarding":
-        telegram_id = update.effective_user.id
-        # Set the user's state in the database to start the flow
-        update_user_state(telegram_id, mode="onboarding", step=1)
-        await query.edit_message_text(
-            "👋 Welcome to Onboarding! Let's get you set up.\n\nFirst, what is your full name?"
-        )
+        
     elif query.data.startswith("dl_"):
         filename = id_map.get(query.data.replace("dl_", ""))
         data = files.get(filename)
@@ -373,10 +375,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 doc_msg = await query.message.reply_document(document=data["file_id"], caption=f"{filename}")
             context.user_data['msg_ids'].append(doc_msg.message_id)
+            
     elif query.data == "menu_manage":
         await manage_files(update, context)
+        
     elif query.data == "back_to_main":
         await query.edit_message_text("Main Menu", reply_markup=get_main_menu_keyboard(role, mode))
+        
     elif query.data == "clear_chat":
         chat_id = update.effective_chat.id
         if 'msg_ids' in context.user_data:
@@ -386,6 +391,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data['msg_ids'] = []
         bot_reply = await context.bot.send_message(chat_id=chat_id, text="Screen cleared!")
         context.user_data['msg_ids'].append(bot_reply.message_id)
+        
     elif query.data == "clear_all":
         chat_id = update.effective_chat.id
         if 'msg_ids' in context.user_data:
@@ -396,6 +402,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if google_id in context.bot_data: context.bot_data[google_id]["file_map"] = {}
         bot_reply = await context.bot.send_message(chat_id=chat_id, text="Wipe successful.")
         context.user_data['msg_ids'].append(bot_reply.message_id)
+        
     elif query.data.startswith("del_"):
         filename = id_map.get(query.data.replace("del_", ""))
         if filename in files:
@@ -403,7 +410,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             remove_ingested_file(filename, google_id)
             await query.edit_message_text(f"Removed: {filename}")
             
-    # --- UPDATED CATEGORY LOGIC FOR MULTIPLE FILES ---
+    # --- MULTI-FILE CATEGORIZATION LOGIC ---
     elif query.data.startswith("cat_"):
         parts = query.data.split("_")
         category = parts[1]
@@ -419,11 +426,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         filename = pending_file['filename']
         pending_file['category'] = category
         
-        # 1. Save to bot memory
+        # Save to bot memory
         files = get_tenant_files(context)
         files[filename] = pending_file
         
-        # 2. Log to database with the new category
+        # Log to database
         log_ingested_file(
             filename, 
             update.effective_user.id, 
@@ -432,9 +439,157 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             category
         )
         
-        # 3. Clean up specific file memory and update the UI
+        # Clean up memory
         del pending_files[msg_id]
-        await query.edit_message_text(f"✅ <b>{filename}</b> successfully saved under <b>[{category}]</b>.", parse_mode="HTML")
+        await query.edit_message_text(f" <b>{filename}</b> successfully saved under <b>[{category}]</b>.", parse_mode="HTML")
+
+    # --- ONBOARDING LOGIC ---
+    elif query.data == "start_onboarding":
+        telegram_id = update.effective_user.id
+        update_user_state(telegram_id, mode="onboarding", step=1)
+        await query.edit_message_text(
+            " Welcome to Onboarding! Let's get you set up.\n\nFirst, what is your full name?"
+        )
+
+    # --- SALES TRAINING LOGIC ---
+    elif query.data == "start_training":
+        keyboard = [
+            [InlineKeyboardButton(" Technical", callback_data="traincat_Technical"),
+             InlineKeyboardButton(" Marketing", callback_data="traincat_Marketing")],
+            [InlineKeyboardButton(" HR", callback_data="traincat_HR"),
+             InlineKeyboardButton(" General", callback_data="traincat_General")]
+        ]
+        await query.edit_message_text(
+            " <b>Sales Training Mode</b>\n\nWhich category would you like to study today?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
+
+    # --- TAKE A TEST LOGIC ---
+    elif query.data == "start_test":
+        keyboard = [
+            [InlineKeyboardButton(" Technical", callback_data="testcat_Technical"),
+             InlineKeyboardButton(" Marketing", callback_data="testcat_Marketing")],
+            [InlineKeyboardButton(" HR", callback_data="testcat_HR"),
+             InlineKeyboardButton(" General", callback_data="testcat_General")]
+        ]
+        await query.edit_message_text(
+            " <b>Sales Knowledge Test</b>\n\nWhich category would you like to be tested on?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
+
+    elif query.data.startswith("testcat_"):
+        category = query.data.split("_")[1]
+        telegram_id = update.effective_user.id
+        await query.edit_message_text(f" Generating your customized test from <b>{category}</b>... Please wait.", parse_mode="HTML")
+        
+        # 1. Fetch the user's passion from the database
+        lead_data = get_onboarding_lead(telegram_id)
+        passion = lead_data.get('passion', 'achieving career success') if lead_data else 'achieving career success'
+        
+        test_context = ""
+        for name, data in files.items():
+            if data.get('category') == category:
+                test_context += f"\n\n--- SOURCE: {name} ---\n{data['text']}"
+                
+        if not test_context:
+            await query.edit_message_text(f" No documents found in <b>{category}</b>.", parse_mode="HTML")
+            return
+            
+        # 2. Randomize total questions between 3 and 7
+        num_mcqs = random.randint(0, 4)
+        total_questions = 3 + num_mcqs
+            
+        prompt = f"""Based ONLY on these {category} documents, generate a test with EXACTLY {total_questions} questions. Do NOT use line breaks inside a question.
+
+        REQUIREMENTS:
+        - Questions 1 to 3 MUST be theoretical free-text questions about the documents. Format each exactly like this on a single line:
+        TEXT_Q::: [Question Text]
+        """
+        
+        if num_mcqs > 0:
+            prompt += f"""
+        - The remaining {num_mcqs} questions MUST be Multiple Choice Questions (MCQs).
+        - The MCQs MUST integrate the user's core passion/drive, which is: "{passion}". Frame the MCQs as situational sales scenarios combining the documents with their passion. Do NOT ask about their basic personal details.
+        - Format each MCQ exactly like this on a single line:
+        MCQ::: [Question Text] ||| [Option A] ||| [Option B] ||| [Option C] ||| [Option D]
+        """
+
+        try:
+            response = await get_groq_response(prompt, test_context, temperature=0.3)
+            
+            # 3. Parse Groq's output securely
+            questions = []
+            for line in response.split('\n'):
+                line = line.strip()
+                if line.startswith("TEXT_Q:::"):
+                    questions.append({
+                        "type": "text", 
+                        "text": line.replace("TEXT_Q:::", "").strip()
+                    })
+                elif line.startswith("MCQ:::"):
+                    parts = line.replace("MCQ:::", "").split("|||")
+                    if len(parts) >= 5:
+                        questions.append({
+                            "type": "mcq", 
+                            "text": parts[0].strip(), 
+                            "options": [p.strip() for p in parts[1:5]]
+                        })
+            
+            if len(questions) < 3:
+                await query.edit_message_text(" Failed to generate the test format correctly. Please try again.")
+                return
+                
+            # Lock the user into "Testing" mode
+            update_user_state(telegram_id, "testing", step=0, metadata={
+                "category": category,
+                "questions": questions,
+                "answers": [],
+                "total_questions": len(questions)
+            })
+            
+            first_q = questions[0]
+            await query.edit_message_text(
+                f" <b>Test Started: {category}</b>\n\n<b>Question 1 of {len(questions)}:</b>\n{first_q['text']}\n\n<i>Type your answer below:</i>",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Test generation error: {e}")
+            await query.edit_message_text(" Error generating test.")
+    elif query.data.startswith("traincat_"):
+        category = query.data.split("_")[1]
+        await query.edit_message_text(f" Pulling training materials for <b>{category}</b>... Please wait.", parse_mode="HTML")
+        
+        # Filter files by the selected category
+        training_context = ""
+        for name, data in files.items():
+            if data.get('category') == category:
+                training_context += f"\n\n--- SOURCE: {name} ---\n{data['text']}"
+                
+        if not training_context:
+            await query.edit_message_text(
+                f" No documents found in the <b>{category}</b> category. Admin needs to upload some in Feed Mode first.", 
+                parse_mode="HTML"
+            )
+            return
+            
+        # Ask Groq for a specific training summary
+        prompt = f"Create a bite-sized, highly actionable 3-bullet-point training summary based ONLY on these {category} documents. Keep it brief to help a sales rep learn the material quickly."
+        
+        try:
+            # Use strict temperature (0.2) to prevent hallucination
+            response = await get_groq_response(prompt, training_context, temperature=0.2)
+            
+            tutorial_msg = (
+                f" <b>Training Module: {category}</b>\n\n"
+                f"{response}\n\n"
+                f"<i>When you are ready to test your knowledge, try the Quiz mode!</i>"
+            )
+            await query.edit_message_text(tutorial_msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Training error: {e}")
+            await query.edit_message_text(" Error generating training module. Please try again.")
 
 @require_auth
 async def start_onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -492,6 +647,94 @@ async def handle_onboarding_step(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_html(tutorial_text) 
         await update.message.reply_text("✅ Onboarding Complete! Your profile has been saved. You can now chat with the AI normally.")
 
+async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict):
+    """Processes the Dynamic Randomized Test Mode"""
+    text = update.message.text
+    t_id = update.effective_user.id
+    
+    # Allow user to escape the test
+    if text.lower() in ["/cancel", "cancel"]:
+        update_user_state(t_id, mode="use", step=0, metadata={})
+        await update.message.reply_text("🚫 Test cancelled. Returning to normal chat mode.")
+        return
+
+    step = state['current_step']
+    metadata = state.get('metadata', {})
+    questions = metadata.get("questions", [])
+    answers = metadata.get("answers", [])
+    total_questions = metadata.get("total_questions", 3)
+    
+    # Save user's answer
+    answers.append(text)
+    metadata["answers"] = answers
+    
+    if step + 1 < total_questions:
+        next_step = step + 1
+        update_user_state(t_id, "testing", step=next_step, metadata=metadata)
+        
+        q_data = questions[next_step]
+        msg_text = f"<b>Question {next_step + 1} of {total_questions}:</b>\n{q_data['text']}\n\n"
+        
+        # Format MCQ options if it's a multiple-choice question
+        if q_data['type'] == 'mcq':
+            msg_text += "<b>Options:</b>\n"
+            letters = ['A', 'B', 'C', 'D']
+            for i, opt in enumerate(q_data['options']):
+                msg_text += f"<b>{letters[i]})</b> {opt}\n"
+            msg_text += "\n<i>Type the letter of your answer (A, B, C, or D):</i>"
+        else:
+            msg_text += "<i>Type your answer below:</i>"
+            
+        await update.message.reply_html(msg_text)
+    else:
+        # Evaluate All Answers
+        msg = await update.message.reply_html("⏳ <b>Evaluating your answers...</b> Please wait.")
+        
+        category = metadata.get("category")
+        files = get_tenant_files(context)
+        test_context = "".join([f"\n--- SOURCE: {name} ---\n{data['text']}" for name, data in files.items() if data.get('category') == category])
+        
+        # Build QA Log for Groq
+        qa_log = ""
+        for i in range(total_questions):
+            qa_log += f"Q{i+1}: {questions[i]['text']}\nUser Answer: {answers[i]}\n\n"
+        
+        eval_prompt = (
+            f"You are an expert Sales Manager evaluating a trainee. Assess these {total_questions} answers based ONLY on the provided {category} documents.\n\n"
+            f"{qa_log}"
+            f"Provide brief, constructive remarks for each answer. For MCQs, state if they chose the correct letter. Then assign a total score out of {total_questions}. "
+            "Format your response exactly like this:\n\nSCORE: [X]\n\nREMARKS:\n[Your specific remarks here]"
+        )
+        
+        try:
+            response = await get_groq_response(eval_prompt, test_context, temperature=0.2)
+            
+            score = 0
+            if "SCORE:" in response:
+                try:
+                    score_line = [line for line in response.split("\n") if "SCORE:" in line][0]
+                    score = int(''.join(filter(str.isdigit, score_line)))
+                except: pass
+            
+            simplified_qs = [q['text'] for q in questions]
+            
+            save_test_result({
+                "telegram_id": t_id,
+                "category": category,
+                "qa_data": {"questions": simplified_qs, "user_answers": answers},
+                "score": score,
+                "total_questions": total_questions,
+                "remarks": response
+            })
+            
+            update_user_state(t_id, mode="use", step=0, metadata={})
+            await msg.edit_text(f" Test Complete!\n\n{response}")
+            
+        except Exception as e:
+            logger.error(f"Test evaluation error: {e}")
+            update_user_state(t_id, mode="use", step=0, metadata={})
+            await msg.edit_text(" Error evaluating test. Returning to chat mode.")
+
 @require_auth
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if 'msg_ids' not in context.user_data: context.user_data['msg_ids'] = []
@@ -503,6 +746,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if state and state.get('current_mode') == 'onboarding':
         await handle_onboarding_step(update, context, state)
         return
+    elif state.get('current_mode') == 'testing':
+            await handle_test_step(update, context, state)
+            return
 
     if user_text.lower() == "menu":
         await show_menu(update, context)
@@ -514,6 +760,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     mode = context.user_data.get('mode', 'use')
     google_id = context.user_data.get('google_id')
     files = get_tenant_files(context)
+
+    if google_id:
+        active_filenames = get_active_filenames(google_id)
+        if active_filenames is not None:
+            # list() is required here to prevent dictionary size errors during iteration
+            files_to_remove = [name for name in list(files.keys()) if name not in active_filenames]
+            for name in files_to_remove:
+                del files[name]
 
     # 1. Fetch Dynamic Settings from Supabase linked to the Admin (google_id)
     settings = get_bot_settings(google_id)
