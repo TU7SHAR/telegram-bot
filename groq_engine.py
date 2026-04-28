@@ -7,7 +7,6 @@ from config import GROQ_API_KEY
 
 logger = logging.getLogger(__name__)
 
-# Initial global LLM instance
 llm = ChatGroq(
     model="qwen/qwen3-32b", 
     api_key=GROQ_API_KEY,
@@ -27,13 +26,11 @@ prompt = ChatPromptTemplate.from_messages([
     ("human", "{question}")
 ])
 
-# We don't define a static chain here because temperature is now dynamic
 async def get_groq_response(user_message: str, context: str, temperature: float = 0.2) -> str:
     """Fetches response from Groq using the provided context and dynamic temperature."""
     logger.info(f"GROQ API CALL -> Query: '{user_message[:50]}...' | Temp: {temperature} | Context Size: {len(context)} chars")
     
     try:
-        # Create a dynamic chain that uses the passed temperature
         dynamic_llm = llm.bind(temperature=temperature)
         chain = prompt | dynamic_llm
         

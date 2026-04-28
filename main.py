@@ -23,6 +23,7 @@ def main() -> None:
     application.add_error_handler(handlers.error_handler)
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("menu", handlers.show_menu))
+    application.add_handler(CommandHandler("onboard", handlers.start_onboarding_command))
     application.add_handler(CommandHandler("manage", handlers.manage_files))
     application.add_handler(CommandHandler("crawl", handlers.handle_crawl))
     application.add_handler(CommandHandler("clearchat", handlers.clear_chat_command))

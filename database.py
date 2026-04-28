@@ -124,3 +124,31 @@ def log_chat_interaction(telegram_id, username, query, response, admin_id):
         }).execute()
     except Exception as e:
         logger.error(f"Failed to log chat: {e}")
+
+
+# --- NEW SALES ASSISTANT STATE FUNCTIONS ---
+
+def get_user_state(telegram_id: int):
+    try:
+        res = supabase.table("user_states").select("*").eq("telegram_id", telegram_id).execute()
+        return res.data[0] if res.data else None
+    except Exception as e: 
+        logger.error(f"Error fetching state: {e}")
+        return None
+
+def update_user_state(telegram_id: int, mode: str, step: int = 0, metadata: dict = {}):
+    try:
+        supabase.table("user_states").upsert({
+            "telegram_id": telegram_id,
+            "current_mode": mode,
+            "current_step": step,
+            "metadata": metadata
+        }, on_conflict="telegram_id").execute() # <-- ADD THIS PART
+    except Exception as e:
+        logger.error(f"State update error: {e}")
+
+def save_onboarding_lead(data: dict):
+    try:
+        supabase.table("onboarding_leads").insert(data).execute()
+    except Exception as e:
+        logger.error(f"Lead save error: {e}")

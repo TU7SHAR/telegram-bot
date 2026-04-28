@@ -9,7 +9,7 @@ from telegram.ext import ContextTypes
 from telegram.error import NetworkError, BadRequest
 import scraper
 from groq_engine import get_groq_response
-from database import get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth
+from database import get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth, get_user_state, update_user_state, save_onboarding_lead
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,7 @@ async def deactivate_old_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
 def get_main_menu_keyboard(role: str, mode: str):
     keyboard = []
+    
     if role == "admin":
         modes_row = []
         if mode != "feed":
@@ -72,10 +73,17 @@ def get_main_menu_keyboard(role: str, mode: str):
             keyboard.append([InlineKeyboardButton("Manage Stored Files", callback_data="menu_manage")])
             keyboard.append([InlineKeyboardButton("Crawl New Website", callback_data="menu_crawl")])
 
+    # --- NEW: Show Sales Assistant features in 'Use Mode' ---
+    if mode == "use":
+        keyboard.append([InlineKeyboardButton("📝 Start Onboarding", callback_data="start_onboarding")])
+        # We will uncomment the training button in the next step!
+        # keyboard.append([InlineKeyboardButton("🎓 Sales Training", callback_data="start_training")])
+
     keyboard.append([InlineKeyboardButton("Clear Screen (Keep Memory)", callback_data="clear_chat")])
     if role == "admin":
         keyboard.append([InlineKeyboardButton("Wipe All Memory & Screen", callback_data="clear_all")])
     keyboard.append([InlineKeyboardButton("Support / Help", url="https://t.me/tu7shar")])
+    
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -261,20 +269,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         file_bytes = await tg_file.download_as_bytearray()
         content, truncated, processed, unprocessed = await scraper.extract_content(file_bytes, file.file_name)
         
-        # 1. Hold the file data temporarily
-        context.user_data['pending_file'] = {
+        # 1. HOLD DATA USING A DICTIONARY KEYED BY MESSAGE ID
+        if 'pending_files' not in context.user_data:
+            context.user_data['pending_files'] = {}
+            
+        context.user_data['pending_files'][msg.message_id] = {
             "filename": file.file_name,
             "text": content,
             "file_id": file.file_id,
             "is_crawl": False
         }
         
-        # 2. Create the Category Buttons
+        # 2. PASS THE MESSAGE ID INTO THE BUTTON CALLBACK DATA
+        m_id = msg.message_id
         keyboard = [
-            [InlineKeyboardButton(" Technical", callback_data="cat_Technical"),
-             InlineKeyboardButton(" Marketing", callback_data="cat_Marketing")],
-            [InlineKeyboardButton(" HR", callback_data="cat_HR"),
-             InlineKeyboardButton(" General", callback_data="cat_General")]
+            [InlineKeyboardButton(" Technical", callback_data=f"cat_Technical_{m_id}"),
+             InlineKeyboardButton(" Marketing", callback_data=f"cat_Marketing_{m_id}")],
+            [InlineKeyboardButton(" HR", callback_data=f"cat_HR_{m_id}"),
+             InlineKeyboardButton(" General", callback_data=f"cat_General_{m_id}")]
         ]
         
         await msg.edit_text(
@@ -344,6 +356,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "<b>Web Crawler Instructions</b>\n\nUse <code>/crawl [url]</code>",
             parse_mode="HTML", reply_markup=get_main_menu_keyboard(role, mode)
         )
+    elif query.data == "start_onboarding":
+        telegram_id = update.effective_user.id
+        # Set the user's state in the database to start the flow
+        update_user_state(telegram_id, mode="onboarding", step=1)
+        await query.edit_message_text(
+            "👋 Welcome to Onboarding! Let's get you set up.\n\nFirst, what is your full name?"
+        )
     elif query.data.startswith("dl_"):
         filename = id_map.get(query.data.replace("dl_", ""))
         data = files.get(filename)
@@ -383,9 +402,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             del files[filename]
             remove_ingested_file(filename, google_id)
             await query.edit_message_text(f"Removed: {filename}")
+            
+    # --- UPDATED CATEGORY LOGIC FOR MULTIPLE FILES ---
     elif query.data.startswith("cat_"):
-        category = query.data.split("_")[1]
-        pending_file = context.user_data.get('pending_file')
+        parts = query.data.split("_")
+        category = parts[1]
+        msg_id = int(parts[2]) if len(parts) > 2 else query.message.message_id
+        
+        pending_files = context.user_data.get('pending_files', {})
+        pending_file = pending_files.get(msg_id)
         
         if not pending_file:
             await query.edit_message_text("Session expired. Please upload the file again.")
@@ -407,9 +432,65 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             category
         )
         
-        # 3. Clean up memory and update the UI
-        del context.user_data['pending_file']
+        # 3. Clean up specific file memory and update the UI
+        del pending_files[msg_id]
         await query.edit_message_text(f"✅ <b>{filename}</b> successfully saved under <b>[{category}]</b>.", parse_mode="HTML")
+
+@require_auth
+async def start_onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggered when user types /onboard"""
+    telegram_id = update.effective_user.id
+    update_user_state(telegram_id, mode="onboarding", step=1)
+    await update.message.reply_text("👋 Welcome to Onboarding! Let's get you set up.\n\nFirst, what is your full name?")
+
+async def handle_onboarding_step(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict):
+    """Expanded Onboarding Flow with Bot Tutorial"""
+    step = state['current_step']
+    text = update.message.text
+    metadata = state.get('metadata', {})
+    t_id = update.effective_user.id
+
+    if step == 1:
+        metadata['full_name'] = text
+        update_user_state(t_id, "onboarding", step=2, metadata=metadata)
+        await update.message.reply_text(f"Nice to meet you, {text}! What's the best phone number to reach you at?")
+    
+    elif step == 2:
+        metadata['phone_number'] = text
+        update_user_state(t_id, "onboarding", step=3, metadata=metadata)
+        await update.message.reply_text("Got it. What is your current role or job title in the company?")
+        
+    elif step == 3:
+        metadata['role'] = text
+        update_user_state(t_id, "onboarding", step=4, metadata=metadata)
+        await update.message.reply_text(
+            "Awesome. Finally, tell me a bit about yourself—what is your passion, or what drives you to succeed in your career?"
+        )
+
+    elif step == 4:
+        # Save the detailed lead to the database
+        save_onboarding_lead({
+            "telegram_id": t_id,
+            "full_name": metadata.get('full_name', 'Unknown'),
+            "phone_number": metadata.get('phone_number', 'Unknown'),
+            "role": metadata.get('role', 'Unknown'),
+            "passion": text
+        })
+        
+        # Release the user back to normal AI chat mode
+        update_user_state(t_id, mode="use", step=0, metadata={})
+        
+        # The Onboarding Tutorial Payload
+        tutorial_text = (
+            " <b>Profile Locked In!</b>\n\n"
+            "Welcome aboard. I am your Sales Assistant. Here is how you can use me to crush your goals:\n\n"
+            " <b>Ask Anything:</b> Just type a question (e.g., <i>'What are our pricing tiers?'</i>) and I will pull the exact answer from our company knowledge base.\n"
+            " <b>Sales Training:</b> Need to brush up on a topic? We have bite-sized training modules based on real company documents.\n"
+            " <b>Navigation:</b> If you ever get lost, just type <code>menu</code> to pull up your options.\n\n"
+            "Let's get to work! What do you need help with today?"
+        )
+        await update.message.reply_html(tutorial_text) 
+        await update.message.reply_text("✅ Onboarding Complete! Your profile has been saved. You can now chat with the AI normally.")
 
 @require_auth
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -418,6 +499,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_text = update.message.text
     user = update.effective_user
     
+    state = get_user_state(user.id)
+    if state and state.get('current_mode') == 'onboarding':
+        await handle_onboarding_step(update, context, state)
+        return
+
     if user_text.lower() == "menu":
         await show_menu(update, context)
         return
