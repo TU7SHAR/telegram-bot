@@ -106,7 +106,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
     telegram_id = update.effective_user.id
 
-    # --- SECURITY GUARD: HARD BLOCK BANNED USERS IMMEDIATELY ---
     status = check_auth_status(telegram_id)
     if status == "banned":
         await update.message.reply_text(" Your access has been revoked by the administrator. You are permanently blocked.")
