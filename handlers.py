@@ -19,14 +19,14 @@ def require_auth(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         telegram_id = update.effective_user.id
         
-        # Check their exact status
+        # Check their exact status using the new function
         status = check_auth_status(telegram_id)
         
         if status == "banned":
             if update.callback_query:
-                await update.callback_query.answer(" Access Revoked: You are banned.", show_alert=True)
+                await update.callback_query.answer("🚫 Access Revoked: You are banned.", show_alert=True)
             elif update.message:
-                await update.message.reply_text(" Your access has been revoked by the administrator.")
+                await update.message.reply_text("🚫 Your access has been revoked by the administrator.")
             return
             
         if status == "unauthorized":

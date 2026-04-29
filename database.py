@@ -24,42 +24,6 @@ def is_authorized(telegram_id: int) -> bool:
     """Legacy check for other functions"""
     return check_auth_status(telegram_id) == "authorized"
 
-def verify_and_authorize(token_suffix: str, telegram_id: int, telegram_username: str):
-    try:
-        # --- NEW GUARD: Stop banned users from using new tokens ---
-        if check_auth_status(telegram_id) == "banned":
-            logger.warning(f"Banned user {telegram_id} attempted to use a new token.")
-            return False
-            
-        search_str = f"%{token_suffix}%"
-        
-        res = supabase.table("invite_tokens").select("*").ilike("token_string", search_str).execute()
-
-        if not res.data:
-            return False
-
-        token_record = res.data[0]
-
-        if token_record.get('is_used') is True:
-            return False
-
-        supabase.table("invite_tokens").update({
-            "is_used": True, 
-            "used_by_telegram_id": telegram_id,
-            "used_by_username": telegram_username
-        }).eq("id", token_record['id']).execute()
-
-        supabase.table("authorized_users").upsert({
-            "telegram_id": telegram_id,
-            "token_used": token_record['token_string']
-        }).execute()
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"Authorization Error: {e}")
-        return False
-
 def get_user_role(telegram_id: int) -> str:
     try:
         res = supabase.table("invite_tokens").select("token_type").eq("used_by_telegram_id", telegram_id).execute()
@@ -70,18 +34,13 @@ def get_user_role(telegram_id: int) -> str:
         logger.error(f"Role fetch error: {e}")
         return "normal"
 
-def get_google_id(telegram_id: int) -> str:
-    try:
-        res = supabase.table("invite_tokens").select("created_by").eq("used_by_telegram_id", telegram_id).execute()
-        if res.data and res.data[0].get("created_by"):
-            return res.data[0]["created_by"]
-        return None
-    except Exception as e:
-        logger.error(f"Error fetching Google ID: {e}")
-        return None
-
 def verify_and_authorize(token_suffix: str, telegram_id: int, telegram_username: str):
     try:
+        # 1. Stop previously banned users from circumventing the ban with a new link
+        if check_auth_status(telegram_id) == "banned":
+            logger.warning(f"Banned user {telegram_id} attempted to use a new token.")
+            return False
+            
         search_str = f"%{token_suffix}%"
         
         res = supabase.table("invite_tokens").select("*").ilike("token_string", search_str).execute()
@@ -96,15 +55,18 @@ def verify_and_authorize(token_suffix: str, telegram_id: int, telegram_username:
             logger.warning("Token is already marked as used.")
             return False
 
+        # 2. Mark the token as used
         supabase.table("invite_tokens").update({
             "is_used": True, 
             "used_by_telegram_id": telegram_id,
             "used_by_username": telegram_username
         }).eq("id", token_record['id']).execute()
 
+        # 3. CRITICAL: Force is_banned to False so they don't get ghost-banned by DB defaults
         supabase.table("authorized_users").upsert({
             "telegram_id": telegram_id,
-            "token_used": token_record['token_string']
+            "token_used": token_record['token_string'],
+            "is_banned": False  # <-- THIS KILLS THE GHOST BAN
         }).execute()
             
         return True
@@ -112,6 +74,16 @@ def verify_and_authorize(token_suffix: str, telegram_id: int, telegram_username:
     except Exception as e:
         logger.error(f"Authorization Error: {e}")
         return False
+
+def get_google_id(telegram_id: int) -> str:
+    try:
+        res = supabase.table("invite_tokens").select("created_by").eq("used_by_telegram_id", telegram_id).execute()
+        if res.data and res.data[0].get("created_by"):
+            return res.data[0]["created_by"]
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching Google ID: {e}")
+        return None
 
 def log_ingested_file(filename: str, telegram_id: int, username: str, google_id: str, category: str = "General"):
     try:
