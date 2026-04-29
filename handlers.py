@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 from telegram.error import NetworkError, BadRequest
 import scraper
 from groq_engine import get_groq_response
-from database import get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth, get_user_state, update_user_state, save_onboarding_lead, get_active_filenames, save_test_result, get_onboarding_lead
+from database import get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, check_auth_status, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth, get_user_state, update_user_state, save_onboarding_lead, get_active_filenames, save_test_result, get_onboarding_lead
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,18 @@ def require_auth(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         telegram_id = update.effective_user.id
-        if not is_authorized(telegram_id):
+        
+        # Check their exact status
+        status = check_auth_status(telegram_id)
+        
+        if status == "banned":
+            if update.callback_query:
+                await update.callback_query.answer(" Access Revoked: You are banned.", show_alert=True)
+            elif update.message:
+                await update.message.reply_text(" Your access has been revoked by the administrator.")
+            return
+            
+        if status == "unauthorized":
             if update.callback_query:
                 await update.callback_query.answer(" Access Denied.", show_alert=True)
             elif update.message:
@@ -45,7 +56,10 @@ def get_tenant_files(context: ContextTypes.DEFAULT_TYPE):
 
 async def deactivate_old_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     last_id = context.user_data.get("last_menu_id")
-    if last_id:
+    pinned_id = context.user_data.get("pinned_menu_id")
+    
+    # GUARD: Do not delete or deactivate the menu if it is the master pinned menu!
+    if last_id and last_id != pinned_id:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=last_id)
         except BadRequest:
@@ -90,13 +104,19 @@ def get_main_menu_keyboard(role: str, mode: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
+    telegram_id = update.effective_user.id
+
+    # --- SECURITY GUARD: HARD BLOCK BANNED USERS IMMEDIATELY ---
+    status = check_auth_status(telegram_id)
+    if status == "banned":
+        await update.message.reply_text(" Your access has been revoked by the administrator. You are permanently blocked.")
+        return
 
     if not context.args:
         await update.message.reply_text(" Access Denied. Please use a valid invite link from the dashboard.")
         return
 
     token_id = context.args[0]
-    telegram_id = update.effective_user.id
     telegram_username = update.effective_user.username or update.effective_user.first_name
     
     is_valid = verify_and_authorize(token_id, telegram_id, telegram_username)
@@ -133,12 +153,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
     await update.message.reply_html(manual_text)
 
-    # 2. Automatically show the interactive menu
     sent_msg = await update.message.reply_html(
         "<b>Main Menu</b>",
         reply_markup=get_main_menu_keyboard(role, context.user_data['mode'])
     )
     context.user_data["last_menu_id"] = sent_msg.message_id
+    
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=chat_id, 
+            message_id=sent_msg.message_id, 
+            disable_notification=True # Prevents annoying ping sound
+        )
+        context.user_data["pinned_menu_id"] = sent_msg.message_id
+    except Exception as e:
+        logger.error(f"Failed to pin message: {e}")
 
 @require_auth
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -673,7 +702,6 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
     text = update.message.text
     t_id = update.effective_user.id
     
-    # Allow user to escape the test
     if text.lower() in ["/cancel", "cancel"]:
         update_user_state(t_id, mode="use", step=0, metadata={})
         await update.message.reply_text(" Test cancelled. Returning to normal chat mode.")
@@ -709,21 +737,32 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
         await update.message.reply_html(msg_text)
     else:
         # Evaluate All Answers
-        msg = await update.message.reply_html(" <b>Evaluating your answers...</b> Please wait.")
+        msg = await update.message.reply_html("<b>Evaluating your answers...</b> Please wait.")
         
         category = metadata.get("category")
         files = get_tenant_files(context)
         test_context = "".join([f"\n--- SOURCE: {name} ---\n{data['text']}" for name, data in files.items() if data.get('category') == category])
         
-        # Build QA Log for Groq
         qa_log = ""
-        for i in range(total_questions):
-            qa_log += f"Q{i+1}: {questions[i]['text']}\nUser Answer: {answers[i]}\n\n"
+        simplified_qs = []
         
+        for i in range(total_questions):
+            q_obj = questions[i]
+            
+            if q_obj['type'] == 'mcq':
+                options_str = " | ".join([f"{chr(65+idx)}) {opt}" for idx, opt in enumerate(q_obj['options'])])
+                full_q_text = f"{q_obj['text']} \n[Options: {options_str}]"
+                
+                qa_log += f"Q{i+1} (MCQ): {full_q_text}\nUser Answer: {answers[i]}\n\n"
+                simplified_qs.append(full_q_text)
+            else:
+                qa_log += f"Q{i+1}: {q_obj['text']}\nUser Answer: {answers[i]}\n\n"
+                simplified_qs.append(q_obj['text'])
+
         eval_prompt = (
             f"You are an expert Sales Manager evaluating a trainee. Assess these {total_questions} answers based ONLY on the provided {category} documents.\n\n"
             f"{qa_log}"
-            f"Provide brief, constructive remarks for each answer. For MCQs, state if they chose the correct letter. Then assign a total score out of {total_questions}. "
+            f"Provide brief, constructive remarks for each answer. For MCQs, state if they chose the correct letter based on the options provided. Then assign a total score out of {total_questions}. "
             "Format your response exactly like this:\n\nSCORE: [X]\n\nREMARKS:\n[Your specific remarks here]"
         )
         
@@ -736,8 +775,6 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                     score_line = [line for line in response.split("\n") if "SCORE:" in line][0]
                     score = int(''.join(filter(str.isdigit, score_line)))
                 except: pass
-            
-            simplified_qs = [q['text'] for q in questions]
             
             save_test_result({
                 "telegram_id": t_id,
@@ -885,6 +922,5 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['msg_ids'] = []
     context.user_data['msg_ids'].append(msg.message_id)
 
-# FIXED BUG: Logs errors properly instead of passing them silently
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)

@@ -6,12 +6,58 @@ logger = logging.getLogger(__name__)
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def is_authorized(telegram_id: int) -> bool:
+def check_auth_status(telegram_id: int) -> str:
+    """Returns 'authorized', 'banned', or 'unauthorized'"""
     try:
         res = supabase.table("authorized_users").select("*").eq("telegram_id", telegram_id).execute()
-        return len(res.data) > 0
+        if len(res.data) > 0:
+            # If the database says they are banned, lock them out
+            if res.data[0].get("is_banned"):
+                return "banned"
+            return "authorized"
+        return "unauthorized"
     except Exception as e:
         logger.error(f"Auth check error: {e}")
+        return "unauthorized"
+
+def is_authorized(telegram_id: int) -> bool:
+    """Legacy check for other functions"""
+    return check_auth_status(telegram_id) == "authorized"
+
+def verify_and_authorize(token_suffix: str, telegram_id: int, telegram_username: str):
+    try:
+        # --- NEW GUARD: Stop banned users from using new tokens ---
+        if check_auth_status(telegram_id) == "banned":
+            logger.warning(f"Banned user {telegram_id} attempted to use a new token.")
+            return False
+            
+        search_str = f"%{token_suffix}%"
+        
+        res = supabase.table("invite_tokens").select("*").ilike("token_string", search_str).execute()
+
+        if not res.data:
+            return False
+
+        token_record = res.data[0]
+
+        if token_record.get('is_used') is True:
+            return False
+
+        supabase.table("invite_tokens").update({
+            "is_used": True, 
+            "used_by_telegram_id": telegram_id,
+            "used_by_username": telegram_username
+        }).eq("id", token_record['id']).execute()
+
+        supabase.table("authorized_users").upsert({
+            "telegram_id": telegram_id,
+            "token_used": token_record['token_string']
+        }).execute()
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Authorization Error: {e}")
         return False
 
 def get_user_role(telegram_id: int) -> str:
@@ -80,14 +126,18 @@ def log_ingested_file(filename: str, telegram_id: int, username: str, google_id:
         logger.error(f"Failed to log file to db: {e}")
 
 def clear_user_auth(telegram_id: int) -> bool:
+    """This now permanently revokes the token and officially bans the user."""
     try:
+        # 1. Mark the token as officially revoked (dead)
         supabase.table("invite_tokens").update({
-            "is_used": False, 
-            "used_by_telegram_id": None,
-            "used_by_username": None
+            "is_revoked": True 
         }).eq("used_by_telegram_id", telegram_id).execute()
 
-        supabase.table("authorized_users").delete().eq("telegram_id", telegram_id).execute()
+        # 2. Ban the user instead of deleting them so we can unban later
+        supabase.table("authorized_users").update({
+            "is_banned": True
+        }).eq("telegram_id", telegram_id).execute()
+        
         return True
     except Exception as e:
         logger.error(f"Error clearing auth: {e}")
