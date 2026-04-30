@@ -1,0 +1,91 @@
+class TblTokens:
+    TABLE = "invite_tokens"
+    ID = "id"
+    TOKEN_STRING = "token_string"
+    CREATED_BY = "created_by"
+    CREATED_AT = "created_at"
+    IS_USED = "is_used"
+    USED_BY_ID = "used_by_telegram_id"
+    TOKEN_TYPE = "token_type"
+    USED_BY_USER = "used_by_username"
+    CAPTION = "caption"
+    IS_REVOKED = "is_revoked"
+    SENT_TO = "sent_to"
+
+class TblUsers:
+    TABLE = "authorized_users"
+    ID = "telegram_id"
+    TOKEN_USED = "token_used"
+    ACTIVATED_AT = "activated_at"
+    CREATED_AT = "created_at"
+    IS_BANNED = "is_banned"
+
+class TblBotSettings:
+    TABLE = "bot_settings"
+    ID = "id"
+    CREATED_BY = "created_by"
+    STRICT_MODE = "strict_knowledge_mode"
+    TEMPERATURE = "temperature"
+    MAINTENANCE_MODE = "maintenance_mode"
+    UPDATED_AT = "updated_at"
+
+class TblChat:
+    TABLE = "chat_analytics"
+    ID = "id"
+    TELEGRAM_ID = "telegram_id"
+    USERNAME = "username"
+    USER_QUERY = "user_query"
+    BOT_RESPONSE = "bot_response"
+    ADMIN_ID = "admin_id"
+    CREATED_AT = "created_at"
+
+class TblFiles:
+    TABLE = "ingested_files"
+    ID = "id"
+    FILENAME = "filename"
+    UPLOADED_BY_USER = "uploaded_by_username"
+    UPLOADED_BY_ID = "uploaded_by_telegram_id"
+    CREATED_AT = "created_at"
+    CREATED_BY = "created_by"
+    CATEGORY = "category"
+
+class TblUserStates:
+    TABLE = "user_states"
+    ID = "id"
+    TELEGRAM_ID = "telegram_id"
+    CURRENT_MODE = "current_mode"
+    CURRENT_STEP = "current_step"
+    METADATA = "metadata"
+    UPDATED_AT = "updated_at"
+
+class TblOnboarding:
+    TABLE = "onboarding_leads"
+    ID = "id"
+    TELEGRAM_ID = "telegram_id"
+    FULL_NAME = "full_name"
+    PHONE_NUMBER = "phone_number"
+    EXPERIENCE_LEVEL = "experience_level"
+    GOAL = "goal"
+    CREATED_AT = "created_at"
+    ROLE = "role"
+    PASSION = "passion"
+
+class TblQuiz:
+    TABLE = "quiz_scores"
+    ID = "id"
+    TELEGRAM_ID = "telegram_id"
+    CATEGORY = "category"
+    SCORE = "score"
+    TOTAL_QUESTIONS = "total_questions"
+    CREATED_AT = "created_at"
+
+class TblTests:
+    TABLE = "test_results"
+    ID = "id"
+    TELEGRAM_ID = "telegram_id"
+    CATEGORY = "category"
+    QA_DATA = "qa_data"
+    SCORE = "score"
+    TOTAL_QUESTIONS = "total_questions"
+    REMARKS = "remarks"
+    CREATED_AT = "created_at"

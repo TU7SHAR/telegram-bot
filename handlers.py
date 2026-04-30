@@ -3,14 +3,18 @@ import logging
 import asyncio
 import os
 import sys
-import random # FIXED: This was missing and caused the bot to freeze during test generation!
+import random 
 from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.error import NetworkError, BadRequest
 import scraper
 from groq_engine import get_groq_response
-from database import get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, check_auth_status, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth, get_user_state, update_user_state, save_onboarding_lead, get_active_filenames, save_test_result, get_onboarding_lead
+
+# Added 'supabase' to the imports so the clearkey command can use it directly
+from database import supabase, get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, check_auth_status, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth, get_user_state, update_user_state, save_onboarding_lead, get_active_filenames, save_test_result, get_onboarding_lead, validate_user_access
+
+from schema_map import TblUserStates, TblBotSettings, TblOnboarding, TblUsers, TblTokens
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +28,9 @@ def require_auth(func):
         
         if status == "banned":
             if update.callback_query:
-                await update.callback_query.answer("🚫 Access Revoked: You are banned.", show_alert=True)
+                await update.callback_query.answer("Access Revoked: You are banned.", show_alert=True)
             elif update.message:
-                await update.message.reply_text("🚫 Your access has been revoked by the administrator.")
+                await update.message.reply_text("Your access has been revoked by the administrator.")
             return
             
         if status == "unauthorized":
@@ -88,7 +92,7 @@ def get_main_menu_keyboard(role: str, mode: str):
             keyboard.append([InlineKeyboardButton("Manage Stored Files", callback_data="menu_manage")])
             keyboard.append([InlineKeyboardButton("Crawl New Website", callback_data="menu_crawl")])
 
-    # --- NEW: Show Sales Assistant features in 'Use Mode' ---
+    # Show Sales Assistant features in 'Use Mode'
     if mode == "use":
         keyboard.append([InlineKeyboardButton(" Start Onboarding", callback_data="start_onboarding")])
         keyboard.append([InlineKeyboardButton(" Training Mode", callback_data="start_training")])
@@ -162,7 +166,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.pin_chat_message(
             chat_id=chat_id, 
             message_id=sent_msg.message_id, 
-            disable_notification=True # Prevents annoying ping sound
+            disable_notification=True
         )
         context.user_data["pinned_menu_id"] = sent_msg.message_id
     except Exception as e:
@@ -317,7 +321,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         file_bytes = await tg_file.download_as_bytearray()
         content, truncated, processed, unprocessed = await scraper.extract_content(file_bytes, file.file_name)
         
-        # 1. HOLD DATA USING A DICTIONARY KEYED BY MESSAGE ID
         if 'pending_files' not in context.user_data:
             context.user_data['pending_files'] = {}
             
@@ -328,7 +331,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "is_crawl": False
         }
         
-        # 2. PASS THE MESSAGE ID INTO THE BUTTON CALLBACK DATA
         m_id = msg.message_id
         keyboard = [
             [InlineKeyboardButton(" Technical", callback_data=f"cat_Technical_{m_id}"),
@@ -458,7 +460,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             remove_ingested_file(filename, google_id)
             await query.edit_message_text(f"Removed: {filename}")
             
-    # --- MULTI-FILE CATEGORIZATION LOGIC ---
     elif query.data.startswith("cat_"):
         parts = query.data.split("_")
         category = parts[1]
@@ -474,11 +475,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         filename = pending_file['filename']
         pending_file['category'] = category
         
-        # Save to bot memory
         files = get_tenant_files(context)
         files[filename] = pending_file
         
-        # Log to database
         log_ingested_file(
             filename, 
             update.effective_user.id, 
@@ -487,11 +486,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             category
         )
         
-        # Clean up memory
         del pending_files[msg_id]
         await query.edit_message_text(f" <b>{filename}</b> successfully saved under <b>[{category}]</b>.", parse_mode="HTML")
 
-    # --- ONBOARDING LOGIC ---
     elif query.data == "start_onboarding":
         telegram_id = update.effective_user.id
         update_user_state(telegram_id, mode="onboarding", step=1)
@@ -499,7 +496,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             " Welcome to Onboarding! Let's get you set up.\n\nFirst, what is your full name?"
         )
 
-    # --- SALES TRAINING LOGIC ---
     elif query.data == "start_training":
         keyboard = [
             [InlineKeyboardButton(" Technical", callback_data="traincat_Technical"),
@@ -513,7 +509,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode="HTML"
         )
 
-    # --- TAKE A TEST LOGIC ---
     elif query.data == "start_test":
         keyboard = [
             [InlineKeyboardButton(" Technical", callback_data="testcat_Technical"),
@@ -532,9 +527,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         telegram_id = update.effective_user.id
         await query.edit_message_text(f" Generating your customized test from <b>{category}</b>... Please wait.", parse_mode="HTML")
         
-        # 1. Fetch the user's passion from the database
+        # USE MAPPED KEY FOR FETCHING PASSION
         lead_data = get_onboarding_lead(telegram_id)
-        passion = lead_data.get('passion', 'achieving career success') if lead_data else 'achieving career success'
+        passion = lead_data.get(TblOnboarding.PASSION, 'achieving career success') if lead_data else 'achieving career success'
         
         test_context = ""
         for name, data in files.items():
@@ -545,7 +540,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.edit_message_text(f" No documents found in <b>{category}</b>.", parse_mode="HTML")
             return
             
-        # FIXED BUG: Missing import random at the top was causing this to crash!
         num_mcqs = random.randint(0, 4)
         total_questions = 3 + num_mcqs
             
@@ -567,7 +561,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             response = await get_groq_response(prompt, test_context, temperature=0.3)
             
-            # 3. Parse Groq's output securely
             questions = []
             for line in response.split('\n'):
                 line = line.strip()
@@ -589,7 +582,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await query.edit_message_text(" Failed to generate the test format correctly. Please try again.")
                 return
                 
-            # Lock the user into "Testing" mode
             update_user_state(telegram_id, "testing", step=0, metadata={
                 "category": category,
                 "questions": questions,
@@ -610,7 +602,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         category = query.data.split("_")[1]
         await query.edit_message_text(f" Pulling training materials for <b>{category}</b>... Please wait.", parse_mode="HTML")
         
-        # Filter files by the selected category
         training_context = ""
         for name, data in files.items():
             if data.get('category') == category:
@@ -623,11 +614,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
             
-        # Ask Groq for a specific training summary
         prompt = f"Create a bite-sized, highly actionable 3-bullet-point training summary based ONLY on these {category} documents. Keep it brief to help a sales rep learn the material quickly."
         
         try:
-            # Use strict temperature (0.2) to prevent hallucination
             response = await get_groq_response(prompt, training_context, temperature=0.2)
             
             tutorial_msg = (
@@ -642,16 +631,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 @require_auth
 async def start_onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Triggered when user types /onboard"""
     telegram_id = update.effective_user.id
     update_user_state(telegram_id, mode="onboarding", step=1)
     await update.message.reply_text(" Welcome to Onboarding! Let's get you set up.\n\nFirst, what is your full name?")
 
 async def handle_onboarding_step(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict):
-    """Expanded Onboarding Flow with Bot Tutorial"""
-    step = state['current_step']
+    # USE MAPPED KEYS
+    step = state[TblUserStates.CURRENT_STEP]
     text = update.message.text
-    metadata = state.get('metadata', {})
+    metadata = state.get(TblUserStates.METADATA, {})
     t_id = update.effective_user.id
 
     if step == 1:
@@ -672,19 +660,17 @@ async def handle_onboarding_step(update: Update, context: ContextTypes.DEFAULT_T
         )
 
     elif step == 4:
-        # Save the detailed lead to the database
+        # SAVE USING MAPPED DICT KEYS
         save_onboarding_lead({
-            "telegram_id": t_id,
-            "full_name": metadata.get('full_name', 'Unknown'),
-            "phone_number": metadata.get('phone_number', 'Unknown'),
-            "role": metadata.get('role', 'Unknown'),
-            "passion": text
+            TblOnboarding.TELEGRAM_ID: t_id,
+            TblOnboarding.FULL_NAME: metadata.get('full_name', 'Unknown'),
+            TblOnboarding.PHONE_NUMBER: metadata.get('phone_number', 'Unknown'),
+            TblOnboarding.ROLE: metadata.get('role', 'Unknown'),
+            TblOnboarding.PASSION: text
         })
         
-        # Release the user back to normal AI chat mode
         update_user_state(t_id, mode="use", step=0, metadata={})
         
-        # The Onboarding Tutorial Payload
         tutorial_text = (
             " <b>Profile Locked In!</b>\n\n"
             "Welcome aboard. I am your Sales Assistant. Here is how you can use me to crush your goals:\n\n"
@@ -697,7 +683,6 @@ async def handle_onboarding_step(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(" Onboarding Complete! Your profile has been saved. You can now chat with the AI normally.")
 
 async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict):
-    """Processes the Dynamic Randomized Test Mode"""
     text = update.message.text
     t_id = update.effective_user.id
     
@@ -706,13 +691,13 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
         await update.message.reply_text(" Test cancelled. Returning to normal chat mode.")
         return
 
-    step = state['current_step']
-    metadata = state.get('metadata', {})
+    # USE MAPPED KEYS
+    step = state[TblUserStates.CURRENT_STEP]
+    metadata = state.get(TblUserStates.METADATA, {})
     questions = metadata.get("questions", [])
     answers = metadata.get("answers", [])
     total_questions = metadata.get("total_questions", 3)
     
-    # Save user's answer
     answers.append(text)
     metadata["answers"] = answers
     
@@ -723,7 +708,6 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
         q_data = questions[next_step]
         msg_text = f"<b>Question {next_step + 1} of {total_questions}:</b>\n{q_data['text']}\n\n"
         
-        # Format MCQ options if it's a multiple-choice question
         if q_data['type'] == 'mcq':
             msg_text += "<b>Options:</b>\n"
             letters = ['A', 'B', 'C', 'D']
@@ -735,7 +719,6 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             
         await update.message.reply_html(msg_text)
     else:
-        # Evaluate All Answers
         msg = await update.message.reply_html("<b>Evaluating your answers...</b> Please wait.")
         
         category = metadata.get("category")
@@ -792,28 +775,38 @@ async def handle_test_step(update: Update, context: ContextTypes.DEFAULT_TYPE, s
             update_user_state(t_id, mode="use", step=0, metadata={})
             await msg.edit_text(" Error evaluating test. Returning to chat mode.")
 
+
 @require_auth
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if 'msg_ids' not in context.user_data: context.user_data['msg_ids'] = []
-    context.user_data['msg_ids'].append(update.message.message_id)
+    if 'msg_ids' not in context.user_data: 
+        context.user_data['msg_ids'] = []
     
-    user_text = update.message.text
     user = update.effective_user
+    user_text = update.message.text
     
-    # FIXED BUG: Safely ignore images/files sent without text
     if not user_text:
         return
+
+    is_authorized, status_msg = validate_user_access(user.id)
     
-    # FIXED BUG: Safely check state without crashing if the user state is None
+    if not is_authorized:
+        msg = await update.message.reply_text(f" {status_msg}")
+        context.user_data['msg_ids'].append(msg.message_id)
+        return
+
+    context.user_data['msg_ids'].append(update.message.message_id)
+    
+    # Check for onboarding or testing states using mapped keys
     state = get_user_state(user.id)
     if state:
-        if state.get('current_mode') == 'onboarding':
+        if state.get(TblUserStates.CURRENT_MODE) == 'onboarding':
             await handle_onboarding_step(update, context, state)
             return
-        elif state.get('current_mode') == 'testing':
+        elif state.get(TblUserStates.CURRENT_MODE) == 'testing':
             await handle_test_step(update, context, state)
             return
 
+    # Menu handling
     if user_text.lower() == "menu":
         await show_menu(update, context)
         return
@@ -825,26 +818,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     google_id = context.user_data.get('google_id')
     files = get_tenant_files(context)
 
+    # Filter knowledge base files
     if google_id:
         active_filenames = get_active_filenames(google_id)
         if active_filenames is not None:
-            # list() is required here to prevent dictionary size errors during iteration
             files_to_remove = [name for name in list(files.keys()) if name not in active_filenames]
             for name in files_to_remove:
                 del files[name]
 
-    # FIXED BUG: Handle None google_id safely to prevent Supabase crash
+    # Maintenance mode check using mapped key
     settings = get_bot_settings(google_id) if google_id else {}
-    
-    # 2. Maintenance Mode Check
-    if settings.get('maintenance_mode') and role != 'admin':
+    if settings.get(TblBotSettings.MAINTENANCE_MODE) and role != 'admin':
         msg = await update.message.reply_html(
             "🚧 <b>Maintenance Mode</b>\nThe bot is temporarily offline for updates. Please check back later."
         )
         context.user_data['msg_ids'].append(msg.message_id)
         return
     
-    # --- Mode Logic ---
+    # Admin custom text saving
     if role == 'admin' and mode == 'test':
         safe_name = "CustomText"
         filename = f"{safe_name}_{hashlib.md5(user_text.encode()).hexdigest()[:6]}.txt"
@@ -858,11 +849,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data['msg_ids'].append(msg.message_id)
         return
         
-    if role == 'admin' and mode == 'feed':
-        msg = await update.message.reply_text(" Switch to Use Mode to ask questions.", reply_markup=get_main_menu_keyboard(role, mode))
-        context.user_data['msg_ids'].append(msg.message_id)
-        return
-        
+    # Check for empty knowledge base
     if not files:
         if role == 'admin':
             msg = await update.message.reply_text("Your Knowledge Base is empty. Upload files.", reply_markup=get_main_menu_keyboard(role, mode))
@@ -872,21 +859,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data['msg_ids'].append(msg.message_id)
         return
         
+    # Context preparation
     full_context = ""
     for name, data in files.items():
         full_context += f"\n\n--- SOURCE: {name} ---\n{data['text']}"
         
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
+    # Process AI response using Groq
     try:
-        # 3. Use Dynamic Temperature from Settings (Dashboard controlled)
-        current_temp = settings.get('temperature', 0.2)
-        
+        current_temp = settings.get(TblBotSettings.TEMPERATURE, 0.2)
         response = await get_groq_response(user_text, full_context, temperature=current_temp)
+        
         msg = await update.message.reply_text(response)
         context.user_data['msg_ids'].append(msg.message_id)
 
-        # 4. Log Chat Analytics to Supabase safely
         if google_id:
             log_chat_interaction(
                 telegram_id=user.id,
@@ -897,22 +884,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
     except Exception as e:
-        logger.error(f"Error in handle_message: {e}")
-        msg = await update.message.reply_text("Error processing request.")
+        logger.error(f"Error in handle_message AI processing: {e}")
+        msg = await update.message.reply_text(" Error processing your request.")
         context.user_data['msg_ids'].append(msg.message_id)
 
 async def clear_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Hidden command: Doesn't show in any menus
-    telegram_id = update.effective_user.id
-    
-    success = clear_user_auth(telegram_id)
-    
-    if success:
-        # Wipe local bot memory for this user
-        context.user_data.clear()
-        await update.message.reply_text(" <b>Dev Mode:</b> Your auth is wiped. The token you used is now reusable. Send a new /start link.", parse_mode="HTML")
-    else:
-        await update.message.reply_text(" Failed to clear keys.")
+    telegram_id = str(update.message.from_user.id)
+
+    # 1. First, find which token this user is currently using
+    user_record = supabase.table(TblUsers.TABLE) \
+        .select(TblUsers.TOKEN_USED) \
+        .eq(TblUsers.ID, telegram_id) \
+        .execute()
+
+    if not user_record.data:
+        await update.message.reply_text("You are not currently authenticated.")
+        return
+
+    used_token = user_record.data[0].get(TblUsers.TOKEN_USED)
+
+    if used_token:
+        # 2. Revoke the token so it can't be used again
+        supabase.table(TblTokens.TABLE) \
+            .update({TblTokens.IS_REVOKED: True}) \
+            .eq(TblTokens.TOKEN_STRING, used_token) \
+            .execute()
+
+    # 3. Instead of banning, we just delete their active session
+    supabase.table(TblUsers.TABLE) \
+        .delete() \
+        .eq(TblUsers.ID, telegram_id) \
+        .execute()
+
+    await update.message.reply_text("Session terminated. Your access key has been revoked. You will need a new invite link to use the bot again.")
 
 @require_auth
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
