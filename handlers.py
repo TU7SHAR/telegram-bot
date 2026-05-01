@@ -11,7 +11,6 @@ from telegram.error import NetworkError, BadRequest
 import scraper
 from groq_engine import get_groq_response
 
-# Added 'supabase' to the imports so the clearkey command can use it directly
 from database import supabase, get_bot_settings, log_chat_interaction, verify_and_authorize, is_authorized, check_auth_status, get_user_role, log_ingested_file, remove_ingested_file, get_google_id, clear_user_auth, get_user_state, update_user_state, save_onboarding_lead, get_active_filenames, save_test_result, get_onboarding_lead, validate_user_access
 
 from schema_map import TblUserStates, TblBotSettings, TblOnboarding, TblUsers, TblTokens
